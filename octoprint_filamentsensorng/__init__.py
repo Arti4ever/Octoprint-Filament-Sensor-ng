@@ -19,7 +19,8 @@ class filamentsensorngPlugin(octoprint.plugin.StartupPlugin,
             raise Exception("RPi.GPIO must be greater than 0.6")
         GPIO.setwarnings(False)        # Disable GPIO warnings
         self.confirmations_tracking = 0
-        self.turn_off_tracking = False
+        self.send_once_tracking = 0
+        self.ignoreSensor_callback = 0
 
     @property
     def pin(self):
@@ -67,7 +68,7 @@ class filamentsensorngPlugin(octoprint.plugin.StartupPlugin,
                 self._logger.info("Using BCM Mode")
                 GPIO.setmode(GPIO.BCM)
             self._logger.info("Filament Sensor active on GPIO Pin [%s]"%self.pin)
-            GPIO.setup(self.pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+            GPIO.setup(self.pin, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
         else:
             self._logger.info("Pin not configured, won't work unless configured!")
 
@@ -87,7 +88,7 @@ class filamentsensorngPlugin(octoprint.plugin.StartupPlugin,
             'debug_mode':0, # Debug off!
             'pause_print':True,
         })
-    
+
     def debug_only_output(self, string):
         if self.debug_mode==1:
             self._logger.info(string)
@@ -119,6 +120,9 @@ class filamentsensorngPlugin(octoprint.plugin.StartupPlugin,
             self._logger.info("%s: Enabling filament sensor." % (event))
             if self.sensor_enabled():
                 GPIO.remove_event_detect(self.pin)
+                self.confirmations_tracking = 0
+                self.send_once_tracking = 0
+                self.ignoreSensor_callback = 0
                 GPIO.add_event_detect(
                     self.pin, GPIO.BOTH,
                     callback=self.sensor_callback,
@@ -129,10 +133,12 @@ class filamentsensorngPlugin(octoprint.plugin.StartupPlugin,
             Events.PRINT_DONE,
             Events.PRINT_FAILED,
             Events.PRINT_CANCELLED,
+            Events.PRINT_PAUSED,
             Events.ERROR
         ):
             self._logger.info("%s: Disabling filament sensor." % (event))
-            self.turn_off_tracking = True
+            if self.sensor_enabled():
+                GPIO.remove_event_detect(self.pin)
 
     @octoprint.plugin.BlueprintPlugin.route("/status", methods=["GET"])
     def check_status(self):
@@ -141,28 +147,31 @@ class filamentsensorngPlugin(octoprint.plugin.StartupPlugin,
             status = str(self.no_filament())
         return jsonify( status = status )
 
-    def sensor_callback(self, _):
+    def sensor_callback(self, channel):
+        if self.ignoreSensor_callback==1:
+            return
+        self.ignoreSensor_callback=1
         time.sleep(self.poll_time/1000)
         self.debug_only_output('Pin: '+str(GPIO.input(self.pin)))
         if self.no_filament():
             self.confirmations_tracking+=1
             self.debug_only_output('Confirmations: '+str(self.confirmations_tracking))
-            if self.confirmations<=self.confirmations_tracking:
+            if self.confirmations_tracking >= self.confirmations:
                 self._logger.info("Out of filament!")
-                if self.filamentsensorngPlugin_send_once_tracking==0 or self.send_once==0:
+                if self.send_once==0 or self.send_once_tracking==0:
                     if self.pause_print:
                         self._logger.info("Pausing print.")
                         self._printer.pause_print()
-                        self.turn_off_tracking = False
-                        GPIO.remove_event_detect(self.pin)
                     if self.no_filament_gcode:
                         self._logger.info("Sending out of filament GCODE")
                         self._printer.commands(self.no_filament_gcode)
+                    self.send_once_tracking = 1
                 self.confirmations_tracking = 0
-                self.filamentsensorngPlugin_send_once_tracking = 1
         else:
+            #self._logger.info("Filament detected!")
             self.confirmations_tracking = 0
-            self.filamentsensorngPlugin_send_once_tracking = 0
+            self.send_once_tracking = 0
+            self.ignoreSensor_callback = 0
 
     def get_update_information(self):
         return dict(
